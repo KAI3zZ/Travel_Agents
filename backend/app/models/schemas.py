@@ -129,7 +129,7 @@ class WeatherInfo(BaseModel):
 class TripPlan(BaseModel):
     """旅行计划"""
     city: str = Field(...,description="目的地城市")
-    strat_date: str = Field(...,description="开始日期")
+    start_date: str = Field(...,description="开始日期")
     end_date: str = Field(...,description="结束日期")
     days: List[DayPlan] = Field(default_factory=list,description="每日行程")
     weather_info: List[WeatherInfo] = Field(default_factory=list,description="天气信息")
@@ -156,6 +156,12 @@ class POISearchResponse(BaseModel):
     success: bool = Field(...,description="是否成功")
     message: str = Field(default="",description="消息")
     data: List[POIInfo] = Field(default_factory=list,description="POI列表")
+
+class POIDetailResponse(BaseModel):
+    """POI详情响应"""
+    success: bool = Field(...,description="是否成功")
+    message: str = Field(...,description="消息")
+    data: Optional[dict] = Field(default=None,description="")
 
 class RouteInfo(BaseModel):
     """路线信息"""

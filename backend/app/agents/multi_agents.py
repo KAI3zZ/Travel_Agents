@@ -13,18 +13,9 @@ from langgraph.graph import StateGraph,MessagesState,START,END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_openai import ChatOpenAI
 from ..models.schemas import TripRequest, TripPlan, DayPlan, Attraction, Meal, WeatherInfo, Location, Hotel
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-# 全局多智能体系统实例
-_multi_agents = None
 
-async def get_multi_agents():
-    global _multi_agents
-
-    if _multi_agents is None:
-        _multi_agents = MultiAgents()
-        await _multi_agents.create()
-        
-    return _multi_agents
 
 class MultiAgents:
 
@@ -56,6 +47,9 @@ class MultiAgents:
                 tools=attraction_tools
             )
 
+            # with open("attraction_agent.png", "wb") as f:
+            #     f.write(self.attraction_agent.get_graph().draw_mermaid_png())
+
             weather_tools = [t for t in self.tools if "maps_weather" in t.name]
             weather_prompt = WEATHER_AGENT_PROMPT
             self.weather_agent = create_react_agent(
@@ -64,6 +58,9 @@ class MultiAgents:
                 prompt=weather_prompt,
                 tools=weather_tools
             )
+
+            # with open("weather_agent.png", "wb") as f:
+            #     f.write(self.weather_agent.get_graph().draw_mermaid_png())
 
             hotel_tools = [t for t in self.tools if "maps_text_search" in t.name]
             hotel_prompt = HOTEL_AGENT_PROMPT
@@ -74,6 +71,9 @@ class MultiAgents:
                 tools=hotel_tools
             )
 
+            # with open("hotel_agent.png", "wb") as f:
+            #     f.write(self.hotel_agent.get_graph().draw_mermaid_png())
+
             # 监督者（不需要工具，只负责调度agent、整合并产生标准化输出）
             supervisor_prompt = PLANNER_AGENT_PROMPT
             self.supervisor_agent = create_supervisor(
@@ -82,6 +82,11 @@ class MultiAgents:
                 output_mode="last_message",
                 prompt=supervisor_prompt
             )
+
+
+            # with open("graph.png", "wb") as f:
+            #     f.write(self.supervisor_agent.get_graph().draw_mermaid_png())
+            
             # 无记忆功能
             # app = supervisor_agent.compile()
             # input = {
@@ -140,10 +145,17 @@ class MultiAgents:
             print("生成完整的规划中...")
             # 创建完整的提问
             planner_query = await self._build_planner_query(request)
-            # 
+            # print(f"创建完整的提问 planner_query: {planner_query}\n")
+
+            # 创建完整的回答
             planner_response = await self._build_planner_response(planner_query)
+            # print(f"创建完整的回答 planner_response: {planner_response}\n")
+
             # 解析最终计划
             trip_plan = await self._parse_response(planner_response, request)
+            # print(f"解析最终计划 trip_plan: {trip_plan}\n")
+
+            return trip_plan
 
         except Exception as e:
             print(f"❌ 生成旅行计划失败: {str(e)}")
@@ -177,28 +189,70 @@ class MultiAgents:
         """调用多智能体产生回答"""
         response = ""
 
-        # 编译状态图,有记忆功能
-        app = self.supervisor_agent.compile(checkpointer=self.memory)
-
-        config = {"configurable": {"thread_id": "1"}}
-        inputs = {
-            "messages": [
-                {"role": "user","content": query}
-            ]
-        }
-
+        # 得到已编译的状态图
+        DB_URL = "postgresql://kai:1738560521@localhost:5432/agents_db?sslmode=disable"
         try:
-            async for event in app.astream(inputs, config=config, stream_mode="values"):
-                last_msg = event["messages"][-1]
-                if last_msg.type == "ai":
-                    print(f"AI: {last_msg.content}")
-                    response = last_msg.content
-                elif last_msg.type == "tool":
-                    print(f"工具: {last_msg.content}")
+            async with AsyncPostgresSaver.from_conn_string(DB_URL) as store:
+                async with AsyncPostgresSaver.from_conn_string(DB_URL) as checkpointer:
+                    await checkpointer.setup()
+                    await store.setup()
+
+                    app = self.supervisor_agent.compile(checkpointer=checkpointer, store=store)
+
+                    config = {"configurable": {"thread_id": "1"}}
+                    inputs = {"messages": [{"role": "user", "content": query}]}
+
+                    response = None
+
+                    async for event in app.astream(inputs, config=config, stream_mode="values"):
+                        if "messages" in event and len(event["messages"]) > 0:
+                            last_msg = event["messages"][-1]
+                            if getattr(last_msg, "type", None) == "ai":
+                                response = last_msg.content
+
+                    return response or "No AI response found"
+
         except Exception as e:
+            print(f"❌ 多智能体系统连接数据库失败: {str(e)}")
             raise
         
-        return response
+        # self.supervisor_agent = self.supervisor_agent.compile(checkpointer=self.memory)
+        # app = self.supervisor_agent
+
+        # config = {"configurable": {"thread_id": "1"}}
+        # inputs = {
+        #     "messages": [
+        #         {"role": "user","content": query}
+        #     ]
+        # }
+
+        # i = 0
+
+        # # 同步调用
+        # # app.invoke(input=inputs,
+        # #            config=config)
+
+        # try:
+        #     async for event in app.astream(inputs, config=config, stream_mode="values"):
+        #         last_msg = event["messages"][-1]
+        #         i+=1
+        #         print(f"\n event{i}:\n{str(event)}\n")
+        #         # print(f"\n last_msg{i}:\n{last_msg}\n")
+        #         # print(f"\n last_msg{i}.type:\n{last_msg.type}\n")
+
+
+        #         if last_msg.type == "ai":
+        #             # print(f"AI: {last_msg.content}")
+        #             response = last_msg.content
+        #         # elif last_msg.type == "tool":
+        #         #     print(f"工具: {last_msg.content}")
+        # except Exception as e:
+        #     raise
+        
+        # # print("\n✅ 多智能体协作完成，获得回答。\n")
+        # # print("response:"+response+"\n")
+
+        # return response
     
 
     async def _parse_response(self, response: str, request: TripRequest) -> TripPlan:
@@ -226,8 +280,25 @@ class MultiAgents:
             # json.loads(str)是字符串转Python对象
             data = json.loads(json_str)
 
+
+            # TODO: 解析data，转换为TripPlan对象
+
             # 转换为TripPlan对象
             trip_plan = TripPlan(**data)
+
+
+            print("✅ 成功解析旅行计划。")
+
+            print(f"\n{'='*60}\n")
+            print(f"data:{data}\n")
+            print(f"type(data):{type(data)}\n")
+
+            print(f"\n{'='*60}\n")
+            print(f"trip_plan:{trip_plan}\n")
+
+            print(f"\n{'='*60}\n")
+            print(f"type(trip_plan):{type(trip_plan)}\n")
+            print(f"\n{'='*60}\n")
 
             return trip_plan
         
@@ -236,7 +307,17 @@ class MultiAgents:
             # print(f"   将使用备用方案生成计划")
             # return self._create_fallback_plan(request)
        
+# 全局多智能体系统实例
+_multi_agents = None
 
+async def get_multi_agents():
+    global _multi_agents
+
+    if _multi_agents is None:
+        _multi_agents = MultiAgents()
+        await _multi_agents.create()
+
+    return _multi_agents
 
 
 

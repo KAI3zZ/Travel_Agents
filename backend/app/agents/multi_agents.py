@@ -14,7 +14,17 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_openai import ChatOpenAI
 from ..models.schemas import TripRequest, TripPlan, DayPlan, Attraction, Meal, WeatherInfo, Location, Hotel
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
+from langgraph.store.postgres.aio import AsyncPostgresStore
+import uuid
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('memory.log', encoding='utf-8'),  # 写入文件
+        logging.StreamHandler()  # 同时输出到控制台（可选）
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 class MultiAgents:
@@ -187,30 +197,40 @@ class MultiAgents:
 
     async def _build_planner_response(self, query: str) -> str:
         """调用多智能体产生回答"""
-        response = ""
 
         # 得到已编译的状态图
         DB_URL = "postgresql://kai:1738560521@localhost:5432/agents_db?sslmode=disable"
         try:
-            async with AsyncPostgresSaver.from_conn_string(DB_URL) as store:
-                async with AsyncPostgresSaver.from_conn_string(DB_URL) as checkpointer:
-                    await checkpointer.setup()
-                    await store.setup()
+            async with(
+                AsyncPostgresStore.from_conn_string(DB_URL) as store,
+                AsyncPostgresSaver.from_conn_string(DB_URL) as checkpointer
+            ):
+                await checkpointer.setup()
+                await store.setup()
 
-                    app = self.supervisor_agent.compile(checkpointer=checkpointer, store=store)
+                app = self.supervisor_agent.compile(checkpointer=checkpointer, store=store)
 
-                    config = {"configurable": {"thread_id": "1"}}
-                    inputs = {"messages": [{"role": "user", "content": query}]}
 
-                    response = None
+                config = {"configurable": {"thread_id": "thread-1"}}
+                inputs = {"messages": [{"role": "user", "content": query}]}
 
-                    async for event in app.astream(inputs, config=config, stream_mode="values"):
-                        if "messages" in event and len(event["messages"]) > 0:
-                            last_msg = event["messages"][-1]
-                            if getattr(last_msg, "type", None) == "ai":
-                                response = last_msg.content
+                short_memory = await app.aget_state(config)
+                long_memory = [state async for state in app.aget_state_history(config)]
 
-                    return response or "No AI response found"
+                response = await app.ainvoke(inputs,config)
+
+                # async for event in app.astream(inputs, config=config, stream_mode="values"):
+                #     if "messages" in event and len(event["messages"]) > 0:
+                #         last_msg = event["messages"][-1]
+                #         if getattr(last_msg, "type", None) == "ai":
+                #             response = last_msg.content
+                
+                if not short_memory:
+                    logger.info("short_memory is empty")
+                else:
+                    logger.info(f"short_memory:\n{short_memory}")
+
+                return response['messages'][-1].content or "No AI response found"
 
         except Exception as e:
             print(f"❌ 多智能体系统连接数据库失败: {str(e)}")
@@ -289,16 +309,16 @@ class MultiAgents:
 
             print("✅ 成功解析旅行计划。")
 
-            print(f"\n{'='*60}\n")
-            print(f"data:{data}\n")
-            print(f"type(data):{type(data)}\n")
+            # print(f"\n{'='*60}\n")
+            # print(f"data:{data}\n")
+            # print(f"type(data):{type(data)}\n")
 
-            print(f"\n{'='*60}\n")
-            print(f"trip_plan:{trip_plan}\n")
+            # print(f"\n{'='*60}\n")
+            # print(f"trip_plan:{trip_plan}\n")
 
-            print(f"\n{'='*60}\n")
-            print(f"type(trip_plan):{type(trip_plan)}\n")
-            print(f"\n{'='*60}\n")
+            # print(f"\n{'='*60}\n")
+            # print(f"type(trip_plan):{type(trip_plan)}\n")
+            # print(f"\n{'='*60}\n")
 
             return trip_plan
         
